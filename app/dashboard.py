@@ -7,6 +7,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import os
+from pathlib import Path
 import src.config as config
 import src.data_io as data_io
 from src.market_data import get_latest_prices, get_price_history
@@ -19,11 +20,13 @@ from src.analytics import (
 )
 
 st.sidebar.header("⚙️ Configuración")
-access_code = st.sidebar.text_input("Código de acceso", type="password")
-expected_code = st.secrets.get("APP_CODE", os.getenv("APP_CODE"))
-if not expected_code or access_code != expected_code:
-    st.sidebar.warning("Acceso restringido.")
-    st.stop()
+is_cloud = "/mount/src/" in str(Path(__file__).resolve())
+if is_cloud:
+    access_code = st.sidebar.text_input("Código de acceso", type="password")
+    expected_code = st.secrets.get("APP_CODE", os.getenv("APP_CODE"))
+    if not expected_code or access_code != expected_code:
+        st.sidebar.warning("Acceso restringido.")
+        st.stop()
 period = st.sidebar.selectbox(
     "Periodo de análisis",
     options=["6mo", "1y", "3y", "5y"],
@@ -138,6 +141,18 @@ if hasattr(SETTINGS, "historical_pnl_path") and SETTINGS.historical_pnl_path.exi
         hist_pnl_df = hist_pnl_df[hist_pnl_df["date"] >= pd.Timestamp(cutoff_date)]
 
 manual_daily_pnl = None
+prices_hist = price_history[selected_tickers].copy()
+prices_hist.index = pd.to_datetime(prices_hist.index)
+if prices_hist.index.tz is not None:
+    prices_hist.index = prices_hist.index.tz_localize(None)
+today = pd.Timestamp.today().normalize()
+prices_hist = prices_hist.loc[prices_hist.index < today]
+prices_hist = prices_hist.loc[prices_hist.index.weekday < 5]
+prices_hist = prices_hist.ffill()
+qty = positions[positions["ticker"].isin(selected_tickers)].set_index("ticker")["quantity"]
+daily_value_market_full = prices_hist.mul(qty, axis=1).sum(axis=1)
+daily_value_market = daily_value_market_full.loc[daily_value_market_full.index >= pd.Timestamp(cutoff_date)]
+
 if not hist_pnl_df.empty:
     daily_value_full = hist_pnl_df.set_index("date")["Total Cierre"].copy()
     daily_value_full = daily_value_full.loc[daily_value_full.index.weekday < 5]
@@ -147,35 +162,25 @@ if not hist_pnl_df.empty:
         manual_daily_pnl = manual_daily_pnl.loc[manual_daily_pnl.index.weekday < 5]
         manual_daily_pnl = manual_daily_pnl.loc[manual_daily_pnl.index >= pd.Timestamp(cutoff_date)]
 else:
-    prices_hist = price_history[selected_tickers].copy()
-    prices_hist.index = pd.to_datetime(prices_hist.index)
-    if prices_hist.index.tz is not None:
-        prices_hist.index = prices_hist.index.tz_localize(None)
-    today = pd.Timestamp.today().normalize()
-    prices_hist = prices_hist.loc[prices_hist.index < today]
-    prices_hist = prices_hist.loc[prices_hist.index.weekday < 5]
-    prices_hist = prices_hist.ffill()
-    qty = positions[positions["ticker"].isin(selected_tickers)].set_index("ticker")["quantity"]
-    daily_value_full = prices_hist.mul(qty, axis=1).sum(axis=1)
-    daily_value = daily_value_full.loc[daily_value_full.index >= pd.Timestamp(cutoff_date)]
+    daily_value_full = daily_value_market_full
+    daily_value = daily_value_market
 
 filtered_daily_value = daily_value
 if year_filter != "Todos":
     filtered_daily_value = daily_value[daily_value.index.year == int(year_filter)]
 
-if len(filtered_daily_value) >= 1:
-    base_value = float(filtered_daily_value.iloc[-1])
-    base_date = filtered_daily_value.index[-1]
+filtered_daily_value_market = daily_value_market
+if year_filter != "Todos":
+    filtered_daily_value_market = daily_value_market[daily_value_market.index.year == int(year_filter)]
+
+if len(filtered_daily_value_market) >= 1:
+    base_value = float(filtered_daily_value_market.iloc[-1])
+    base_date = filtered_daily_value_market.index[-1]
     live_pnl = total_value - base_value
     live_pnl_pct = (live_pnl / base_value) * 100.0 if base_value else 0.0
-    if manual_daily_pnl is not None and not manual_daily_pnl.empty:
-        filtered_manual_pnl = manual_daily_pnl.reindex(filtered_daily_value.index)
-        last_close_pnl = float(filtered_manual_pnl.iloc[-1])
-        prev_value = base_value - last_close_pnl
-        prev_date = None
-    elif daily_value_full is not None and len(filtered_daily_value) >= 2:
-        prev_value = float(filtered_daily_value.iloc[-2])
-        prev_date = filtered_daily_value.index[-2]
+    if len(filtered_daily_value_market) >= 2:
+        prev_value = float(filtered_daily_value_market.iloc[-2])
+        prev_date = filtered_daily_value_market.index[-2]
         last_close_pnl = base_value - prev_value
     else:
         prev_value = float("nan")
@@ -210,7 +215,7 @@ col7.markdown(
 if year_filter != "Todos":
     st.caption(f"Año activo: {year_filter}")
 if base_date is not None:
-    source_label = "histórico manual" if not hist_pnl_df.empty else "datos de mercado"
+    source_label = "datos de mercado"
     if prev_date is not None:
         st.caption(
             f"Último cierre: {base_date.date().isoformat()} · Base P/L cierre: "
@@ -220,9 +225,9 @@ if base_date is not None:
     else:
         prev_full_value = None
         prev_full_date = None
-        if daily_value_full is not None and len(daily_value_full) >= 2:
-            prev_full_value = float(daily_value_full.iloc[-2])
-            prev_full_date = daily_value_full.index[-2]
+        if daily_value_market_full is not None and len(daily_value_market_full) >= 2:
+            prev_full_value = float(daily_value_market_full.iloc[-2])
+            prev_full_date = daily_value_market_full.index[-2]
         st.caption(
             f"Último cierre: {base_date.date().isoformat()} · P/L cierre: ${last_close_pnl:,.2f} "
             f"· Base cierre: ${base_value:,.2f}"
@@ -241,9 +246,9 @@ st.dataframe(filtered_holdings, use_container_width=True)
 
 import plotly.express as px
 
-st.subheader("📉 P/L cierres diarios")
-if len(daily_value) >= 1:
-    pnl_close = daily_value.diff().dropna()
+st.subheader("📉 P/L cierres diarios (mercado)")
+if len(daily_value_market) >= 1:
+    pnl_close = daily_value_market.diff().dropna()
     pnl_close = pnl_close.loc[pnl_close.index >= pd.Timestamp(cutoff_date)]
     range_col, avg_col = st.columns([3, 1])
     with range_col:
@@ -254,7 +259,7 @@ if len(daily_value) >= 1:
             index=1,
             label_visibility="collapsed",
         )
-    last_date = daily_value.index.max()
+    last_date = daily_value_market.index.max()
     if range_label == "1D":
         start_date = last_date - pd.DateOffset(days=1)
     elif range_label == "1M":
@@ -262,18 +267,14 @@ if len(daily_value) >= 1:
     elif range_label == "1Y":
         start_date = last_date - pd.DateOffset(years=1)
     else:
-        start_date = daily_value.index.min()
+        start_date = daily_value_market.index.min()
 
-    close_series = daily_value.loc[daily_value.index >= start_date]
+    close_series = daily_value_market.loc[daily_value_market.index >= start_date]
     if year_filter != "Todos":
         year_value = int(year_filter)
         close_series = close_series.loc[close_series.index.year == year_value]
-    if manual_daily_pnl is not None and not manual_daily_pnl.empty:
-        pl_series = manual_daily_pnl.reindex(close_series.index)
-        open_series = close_series - pl_series
-    else:
-        open_series = daily_value_full.shift(1).reindex(close_series.index)
-        pl_series = close_series - open_series
+    open_series = daily_value_market_full.shift(1).reindex(close_series.index)
+    pl_series = close_series - open_series
     open_series = open_series.fillna(close_series)
     pl_series = pl_series.fillna(0.0)
 
@@ -287,7 +288,7 @@ if len(daily_value) >= 1:
     ).dropna()
 
     if daily_df.empty:
-        st.info("No hay datos para el ano seleccionado.")
+        st.info("No hay datos de mercado para el rango seleccionado.")
     else:
         fig_close = px.line(
             daily_df,
@@ -298,26 +299,26 @@ if len(daily_value) >= 1:
         avg_pl = float(daily_df["pl"].mean()) if not daily_df.empty else 0.0
         with avg_col:
             st.metric("Promedio P/L", f"${avg_pl:,.2f}")
-        fig_close.update_traces(
-            hovertemplate=(
-                "Fecha: %{x|%Y-%m-%d}<br>"
-                "Open (prev cierre): %{customdata[0]:.2f}<br>"
-                "Close: %{customdata[1]:.2f}<br>"
-                "P/L: %{customdata[2]:.2f}<extra></extra>"
-            ),
-            customdata=daily_df[["open", "close", "pl"]].values,
-        )
-        last_row = daily_df.iloc[-1]
-        fig_close.add_scatter(
-            x=[last_row["date"]],
-            y=[last_row["close"]],
-            mode="markers+text",
-            text=[f"Cierre: {last_row['close']:.2f}"],
-            textposition="top right",
-            marker=dict(size=8, color="#ff4d4f"),
-            name="Ultimo cierre",
-            showlegend=False,
-        )
+    fig_close.update_traces(
+        hovertemplate=(
+            "Fecha: %{x|%Y-%m-%d}<br>"
+            "Open (prev cierre): %{customdata[0]:.2f}<br>"
+            "Close: %{customdata[1]:.2f}<br>"
+            "P/L: %{customdata[2]:.2f}<extra></extra>"
+        ),
+        customdata=daily_df[["open", "close", "pl"]].values,
+    )
+    last_row = daily_df.iloc[-1]
+    fig_close.add_scatter(
+        x=[last_row["date"]],
+        y=[last_row["close"]],
+        mode="markers+text",
+        text=[f"P/L cierre: {last_row['pl']:.2f}"],
+        textposition="top right",
+        marker=dict(size=8, color="#ff4d4f"),
+        name="Ultimo cierre",
+        showlegend=False,
+    )
     st.plotly_chart(fig_close, use_container_width=True)
 else:
     st.info("No hay suficientes cierres para graficar P/L diario.")
