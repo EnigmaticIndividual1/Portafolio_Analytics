@@ -119,18 +119,18 @@ if hasattr(SETTINGS, "historical_pnl_path") and SETTINGS.historical_pnl_path.exi
     hist_raw.columns = [c.strip() for c in hist_raw.columns]
     if "Fecha" in hist_raw.columns and "Total Cierre" in hist_raw.columns:
         hist_raw["date"] = pd.to_datetime(hist_raw["Fecha"], dayfirst=True, errors="coerce")
-        hist_raw["Total Cierre"] = (
-            hist_raw["Total Cierre"]
-            .astype(str)
-            .str.replace(r"[^0-9\\-.]", "", regex=True)
-            .replace("", np.nan)
-            .astype(float)
-        )
+            hist_raw["Total Cierre"] = (
+                hist_raw["Total Cierre"]
+                .astype(str)
+                .str.replace(r"[^0-9.\-]", "", regex=True)
+                .replace("", np.nan)
+                .astype(float)
+            )
         if "Ganancia o perdida diaria" in hist_raw.columns:
             hist_raw["Ganancia o perdida diaria"] = (
                 hist_raw["Ganancia o perdida diaria"]
                 .astype(str)
-                .str.replace(r"[^0-9\\-.]", "", regex=True)
+                .str.replace(r"[^0-9.\-]", "", regex=True)
                 .replace("", np.nan)
                 .astype(float)
             )
