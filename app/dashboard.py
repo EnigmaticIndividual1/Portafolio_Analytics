@@ -58,7 +58,14 @@ all_tickers = tickers + [SETTINGS.benchmark]
 
 # --- Precios actuales ---
 latest_prices = get_latest_prices(all_tickers)
-holdings = compute_holdings_table(positions, latest_prices)
+missing_prices = latest_prices[latest_prices.isna()].index.tolist()
+available_prices = latest_prices.dropna()
+if missing_prices:
+    st.warning(f"Sin precio en Yahoo Finance para: {missing_prices}. Se omiten temporalmente.")
+    positions = positions[~positions["ticker"].isin(missing_prices)]
+    tickers = positions["ticker"].unique().tolist()
+    all_tickers = tickers + [SETTINGS.benchmark]
+holdings = compute_holdings_table(positions, available_prices)
 
 # --- Histórico ---
 price_history = get_price_history(
