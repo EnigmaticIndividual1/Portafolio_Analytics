@@ -241,6 +241,62 @@ if base_date is not None:
 
 st.divider()
 
+st.subheader("✍️ Registrar cierre manual")
+with st.form("manual_close_form"):
+    input_date = st.date_input("Fecha de cierre", value=pd.Timestamp.today().date())
+    close_value = st.number_input("Cierre total (USD)", min_value=0.0, step=100.0, format="%.2f")
+    auto_pnl = st.checkbox("Calcular P/L automáticamente", value=True)
+    pnl_value = st.number_input("P/L del día (USD)", step=10.0, format="%.2f")
+    submitted = st.form_submit_button("Guardar cierre")
+
+if submitted:
+    hist_path = SETTINGS.historical_pnl_path
+    if hist_path.exists():
+        hist_df = pd.read_csv(hist_path, sep="\t")
+    else:
+        hist_df = pd.DataFrame(columns=["Fecha", "Total Cierre", "Ganancia o perdida diaria"])
+
+    def parse_money(series: pd.Series) -> pd.Series:
+        return (
+            series.astype(str)
+            .str.replace(r"[^0-9.\-]", "", regex=True)
+            .replace("", np.nan)
+            .astype(float)
+        )
+
+    if auto_pnl:
+        prev_close = None
+        if "Total Cierre" in hist_df.columns and not hist_df.empty:
+            prev_values = parse_money(hist_df["Total Cierre"]).dropna()
+            if not prev_values.empty:
+                prev_close = float(prev_values.iloc[-1])
+        pnl_value = close_value - prev_close if prev_close is not None else 0.0
+
+    date_str = pd.Timestamp(input_date).strftime("%d/%m/%y")
+    row = {
+        "Fecha": date_str,
+        "Total Cierre": f"${close_value:,.2f}",
+        "Ganancia o perdida diaria": f"${pnl_value:,.2f}",
+    }
+
+    if "Fecha" not in hist_df.columns:
+        hist_df["Fecha"] = np.nan
+    if "Total Cierre" not in hist_df.columns:
+        hist_df["Total Cierre"] = np.nan
+    if "Ganancia o perdida diaria" not in hist_df.columns:
+        hist_df["Ganancia o perdida diaria"] = np.nan
+
+    if (hist_df["Fecha"] == date_str).any():
+        hist_df.loc[hist_df["Fecha"] == date_str, ["Total Cierre", "Ganancia o perdida diaria"]] = [
+            row["Total Cierre"],
+            row["Ganancia o perdida diaria"],
+        ]
+    else:
+        hist_df = pd.concat([hist_df, pd.DataFrame([row])], ignore_index=True)
+
+    hist_df.to_csv(hist_path, sep="\t", index=False)
+    st.success(f"Cierre guardado para {date_str}.")
+
 st.subheader("📋 Holdings")
 st.dataframe(filtered_holdings, use_container_width=True)
 
