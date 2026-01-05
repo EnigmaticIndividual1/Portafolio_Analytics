@@ -6,6 +6,7 @@ def get_latest_prices(tickers: list[str]) -> pd.Series:
     data = yf.download(tickers, period="5d", interval="1d", auto_adjust=False, progress=False)
     close = data["Close"]
     latest = close.dropna(how="all").iloc[-1]
+    latest.attrs["asof"] = close.dropna(how="all").index[-1]
     latest.name = "price"
     return latest
 

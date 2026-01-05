@@ -58,6 +58,7 @@ all_tickers = tickers + [SETTINGS.benchmark]
 
 # --- Precios actuales ---
 latest_prices = get_latest_prices(all_tickers)
+latest_asof = latest_prices.attrs.get("asof")
 missing_prices = latest_prices[latest_prices.isna()].index.tolist()
 available_prices = latest_prices.dropna()
 if missing_prices:
@@ -65,6 +66,7 @@ if missing_prices:
     positions = positions[~positions["ticker"].isin(missing_prices)]
     tickers = positions["ticker"].unique().tolist()
     all_tickers = tickers + [SETTINGS.benchmark]
+available_prices.attrs["asof"] = latest_asof
 holdings = compute_holdings_table(positions, available_prices)
 
 # --- Histórico ---
@@ -74,7 +76,9 @@ price_history = get_price_history(
     SETTINGS.history_interval
 )
 last_market_update = None
-if not price_history.empty:
+if latest_asof is not None:
+    last_market_update = pd.to_datetime(latest_asof)
+elif not price_history.empty:
     last_market_update = pd.to_datetime(price_history.index.max())
 
 # --- Selector de activos ---
@@ -159,6 +163,15 @@ prices_hist = prices_hist.ffill()
 qty = positions[positions["ticker"].isin(selected_tickers)].set_index("ticker")["quantity"]
 daily_value_market_full = prices_hist.mul(qty, axis=1).sum(axis=1)
 daily_value_market = daily_value_market_full.loc[daily_value_market_full.index >= pd.Timestamp(cutoff_date)]
+if latest_asof is not None:
+    latest_asof = pd.to_datetime(latest_asof)
+    if latest_asof.tzinfo is not None:
+        latest_asof = latest_asof.tz_localize(None)
+    if latest_asof not in daily_value_market_full.index:
+        latest_total = available_prices.reindex(qty.index).mul(qty).sum()
+        daily_value_market_full.loc[latest_asof] = float(latest_total)
+        daily_value_market_full = daily_value_market_full.sort_index()
+        daily_value_market = daily_value_market_full.loc[daily_value_market_full.index >= pd.Timestamp(cutoff_date)]
 
 if not hist_pnl_df.empty:
     daily_value_full = hist_pnl_df.set_index("date")["Total Cierre"].copy()
@@ -180,14 +193,14 @@ filtered_daily_value_market = daily_value_market
 if year_filter != "Todos":
     filtered_daily_value_market = daily_value_market[daily_value_market.index.year == int(year_filter)]
 
-if len(filtered_daily_value_market) >= 1:
-    base_value = float(filtered_daily_value_market.iloc[-1])
-    base_date = filtered_daily_value_market.index[-1]
+if len(daily_value_market_full) >= 1:
+    base_value = float(daily_value_market_full.iloc[-1])
+    base_date = daily_value_market_full.index[-1]
     live_pnl = total_value - base_value
     live_pnl_pct = (live_pnl / base_value) * 100.0 if base_value else 0.0
-    if len(filtered_daily_value_market) >= 2:
-        prev_value = float(filtered_daily_value_market.iloc[-2])
-        prev_date = filtered_daily_value_market.index[-2]
+    if len(daily_value_market_full) >= 2:
+        prev_value = float(daily_value_market_full.iloc[-2])
+        prev_date = daily_value_market_full.index[-2]
         last_close_pnl = base_value - prev_value
     else:
         prev_value = float("nan")
@@ -248,64 +261,21 @@ if base_date is not None:
 
 st.divider()
 
-st.subheader("✍️ Registrar cierre manual")
-with st.form("manual_close_form"):
-    input_date = st.date_input("Fecha de cierre", value=pd.Timestamp.today().date())
-    close_value = st.number_input("Cierre total (USD)", min_value=0.0, step=100.0, format="%.2f")
-    auto_pnl = st.checkbox("Calcular P/L automáticamente", value=True)
-    pnl_value = st.number_input("P/L del día (USD)", step=10.0, format="%.2f")
-    submitted = st.form_submit_button("Guardar cierre")
-
-if submitted:
-    hist_path = SETTINGS.historical_pnl_path
-    if hist_path.exists():
-        hist_df = pd.read_csv(hist_path, sep="\t")
-    else:
-        hist_df = pd.DataFrame(columns=["Fecha", "Total Cierre", "Ganancia o perdida diaria"])
-
-    def parse_money(series: pd.Series) -> pd.Series:
-        return (
-            series.astype(str)
-            .str.replace(r"[^0-9.\-]", "", regex=True)
-            .replace("", np.nan)
-            .astype(float)
-        )
-
-    if auto_pnl:
-        prev_close = None
-        if "Total Cierre" in hist_df.columns and not hist_df.empty:
-            prev_values = parse_money(hist_df["Total Cierre"]).dropna()
-            if not prev_values.empty:
-                prev_close = float(prev_values.iloc[-1])
-        pnl_value = close_value - prev_close if prev_close is not None else 0.0
-
-    date_str = pd.Timestamp(input_date).strftime("%d/%m/%y")
-    row = {
-        "Fecha": date_str,
-        "Total Cierre": f"${close_value:,.2f}",
-        "Ganancia o perdida diaria": f"${pnl_value:,.2f}",
-    }
-
-    if "Fecha" not in hist_df.columns:
-        hist_df["Fecha"] = np.nan
-    if "Total Cierre" not in hist_df.columns:
-        hist_df["Total Cierre"] = np.nan
-    if "Ganancia o perdida diaria" not in hist_df.columns:
-        hist_df["Ganancia o perdida diaria"] = np.nan
-
-    if (hist_df["Fecha"] == date_str).any():
-        hist_df.loc[hist_df["Fecha"] == date_str, ["Total Cierre", "Ganancia o perdida diaria"]] = [
-            row["Total Cierre"],
-            row["Ganancia o perdida diaria"],
-        ]
-    else:
-        hist_df = pd.concat([hist_df, pd.DataFrame([row])], ignore_index=True)
-
-    hist_df.to_csv(hist_path, sep="\t", index=False)
-    st.success(f"Cierre guardado para {date_str}.")
-
 st.subheader("📋 Holdings")
-st.dataframe(filtered_holdings, use_container_width=True)
+if not filtered_holdings.empty:
+    def _pnl_color(val):
+        if pd.isna(val):
+            return ""
+        return "color: #52c41a;" if val > 0 else ("color: #ff4d4f;" if val < 0 else "")
+
+    styler = filtered_holdings.style
+    if "pnl" in filtered_holdings.columns:
+        styler = styler.applymap(_pnl_color, subset=["pnl"])
+    if "pnl_pct" in filtered_holdings.columns:
+        styler = styler.applymap(_pnl_color, subset=["pnl_pct"])
+    st.dataframe(styler, use_container_width=True)
+else:
+    st.dataframe(filtered_holdings, use_container_width=True)
 
 import plotly.express as px
 
@@ -317,7 +287,7 @@ if len(daily_value_market) >= 1:
     with range_col:
         range_label = st.radio(
             "Rango",
-            options=["1D", "1M", "1Y", "ALL"],
+            options=["1D", "1M", "1Y", "YTD", "ALL"],
             horizontal=True,
             index=1,
             label_visibility="collapsed",
@@ -329,6 +299,8 @@ if len(daily_value_market) >= 1:
         start_date = last_date - pd.DateOffset(months=1)
     elif range_label == "1Y":
         start_date = last_date - pd.DateOffset(years=1)
+    elif range_label == "YTD":
+        start_date = pd.Timestamp(last_date.year, 1, 1)
     else:
         start_date = daily_value_market.index.min()
 
@@ -353,35 +325,80 @@ if len(daily_value_market) >= 1:
     if daily_df.empty:
         st.info("No hay datos de mercado para el rango seleccionado.")
     else:
+        daily_df["date_str"] = daily_df["date"].dt.strftime("%d %b %Y")
         fig_close = px.line(
             daily_df,
-            x="date",
+            x="date_str",
             y="close",
-            labels={"close": "Cierre diario", "date": "Fecha"},
+            labels={"close": "Cierre diario", "date_str": "Fecha"},
         )
-        avg_pl = float(daily_df["pl"].mean()) if not daily_df.empty else 0.0
         with avg_col:
-            st.metric("Promedio P/L", f"${avg_pl:,.2f}")
-    fig_close.update_traces(
-        hovertemplate=(
-            "Fecha: %{x|%Y-%m-%d}<br>"
-            "Open (prev cierre): %{customdata[0]:.2f}<br>"
-            "Close: %{customdata[1]:.2f}<br>"
-            "P/L: %{customdata[2]:.2f}<extra></extra>"
-        ),
-        customdata=daily_df[["open", "close", "pl"]].values,
-    )
-    last_row = daily_df.iloc[-1]
-    fig_close.add_scatter(
-        x=[last_row["date"]],
-        y=[last_row["close"]],
-        mode="markers+text",
-        text=[f"P/L cierre: {last_row['pl']:.2f}"],
-        textposition="top right",
-        marker=dict(size=8, color="#ff4d4f"),
-        name="Ultimo cierre",
-        showlegend=False,
-    )
+            if range_label == "1D":
+                if len(daily_value_market_full) >= 2:
+                    range_last = float(daily_value_market_full.iloc[-1])
+                    range_first = float(daily_value_market_full.iloc[-2])
+                    range_pl = range_last - range_first
+                    range_pl_pct = (range_pl / range_first) if range_first else 0.0
+                else:
+                    range_pl = 0.0
+                    range_pl_pct = 0.0
+            elif range_label == "YTD":
+                year_start = pd.Timestamp(last_date.year, 1, 1)
+                ytd_series = daily_value_market_full.loc[daily_value_market_full.index >= year_start]
+                if len(ytd_series) >= 1:
+                    range_first = float(ytd_series.iloc[0])
+                    range_last = float(ytd_series.iloc[-1])
+                    range_pl = range_last - range_first if len(ytd_series) >= 2 else 0.0
+                    range_pl_pct = (range_pl / range_first) if range_first else 0.0
+                else:
+                    range_pl = 0.0
+                    range_pl_pct = 0.0
+            else:
+                range_first = close_series.iloc[0] if len(close_series) >= 1 else float("nan")
+                range_last = close_series.iloc[-1] if len(close_series) >= 1 else float("nan")
+                range_pl = range_last - range_first if len(close_series) >= 2 else 0.0
+                range_pl_pct = (range_pl / range_first) if range_first else 0.0
+            st.metric(f"P/L {range_label}", f"${range_pl:,.2f}", delta=f"{range_pl_pct:.2%}")
+        fig_close.update_traces(
+            hovertemplate=(
+                "Fecha: %{customdata[3]}<br>"
+                "Open (prev cierre): %{customdata[0]:.2f}<br>"
+                "Close: %{customdata[1]:.2f}<br>"
+                "P/L: %{customdata[2]:.2f}<extra></extra>"
+            ),
+            customdata=daily_df[["open", "close", "pl", "date_str"]].values,
+        )
+        last_row = daily_df.iloc[-1]
+        fig_close.add_scatter(
+            x=[last_row["date_str"]],
+            y=[last_row["close"]],
+            mode="markers+text",
+            text=[f"P/L cierre: {last_row['pl']:.2f}"],
+            textposition="top right",
+            marker=dict(size=8, color="#ff4d4f"),
+            name="Ultimo cierre",
+            showlegend=False,
+            hovertemplate=(
+                f"Fecha: {last_row['date_str']}<br>"
+                f"Cierre: {last_row['close']:.2f}<br>"
+                f"P/L: {last_row['pl']:.2f}<extra></extra>"
+            ),
+        )
+        if len(daily_df) >= 2:
+            prev_row = daily_df.iloc[-2]
+            fig_close.add_scatter(
+                x=[prev_row["date_str"]],
+                y=[prev_row["close"]],
+                mode="markers",
+                marker=dict(size=6, color="#ff4d4f"),
+                name="Cierre anterior",
+                showlegend=False,
+                hovertemplate=(
+                    f"Fecha: {prev_row['date_str']}<br>"
+                    f"Cierre: {prev_row['close']:.2f}<br>"
+                    f"P/L: {prev_row['pl']:.2f}<extra></extra>"
+                ),
+            )
     st.plotly_chart(fig_close, use_container_width=True)
 else:
     st.info("No hay suficientes cierres para graficar P/L diario.")
@@ -402,20 +419,78 @@ if not portfolio_ret.empty and not benchmark_ret.empty:
             "Benchmark": cum_bench.values,
         }
     )
+    perf_df["date_str"] = perf_df["date"].dt.strftime("%d %b %Y")
     if not aligned.empty:
-        last_perf = aligned.iloc[-1]
-        delta_perf = last_perf["portfolio"] - last_perf["benchmark"]
+        if len(daily_value_market_full) >= 2:
+            last_close = float(daily_value_market_full.iloc[-1])
+            prev_close = float(daily_value_market_full.iloc[-2])
+            last_port_ret = (last_close - prev_close) / prev_close if prev_close else 0.0
+        else:
+            last_port_ret = 0.0
+        last_bench_ret = float(aligned.iloc[-1]["benchmark"])
+        delta_perf = last_port_ret - last_bench_ret
         col_b1, col_b2, col_b3 = st.columns(3)
-        col_b1.metric("Retorno último cierre (Portafolio)", f"{last_perf['portfolio']:.2%}")
-        col_b2.metric("Retorno último cierre (Benchmark)", f"{last_perf['benchmark']:.2%}")
+        col_b1.metric("Retorno último cierre (Portafolio)", f"{last_port_ret:.2%}")
+        col_b2.metric("Retorno último cierre (Benchmark)", f"{last_bench_ret:.2%}")
         col_b3.metric("Delta vs Benchmark", f"{delta_perf:.2%}")
     fig_perf = px.line(
         perf_df,
-        x="date",
+        x="date_str",
         y=["Portafolio", "Benchmark"],
-        labels={"value": "Retorno acumulado", "date": "Fecha", "variable": "Serie"},
+        labels={"value": "Retorno acumulado", "date_str": "Fecha", "variable": "Serie"},
     )
     fig_perf.update_yaxes(tickformat=".1%")
+    if len(perf_df) >= 2:
+        last_point = perf_df.iloc[-1]
+        prev_point = perf_df.iloc[-2]
+        fig_perf.add_scatter(
+            x=[last_point["date_str"]],
+            y=[last_point["Portafolio"]],
+            mode="markers",
+            marker=dict(size=6, color="#ff4d4f"),
+            name="Cierre Portafolio",
+            showlegend=False,
+            hovertemplate=(
+                f"Fecha: {last_point['date_str']}<br>"
+                f"Portafolio: {last_point['Portafolio']:.2%}<extra></extra>"
+            ),
+        )
+        fig_perf.add_scatter(
+            x=[last_point["date_str"]],
+            y=[last_point["Benchmark"]],
+            mode="markers",
+            marker=dict(size=6, color="#ff4d4f"),
+            name="Cierre Benchmark",
+            showlegend=False,
+            hovertemplate=(
+                f"Fecha: {last_point['date_str']}<br>"
+                f"Benchmark: {last_point['Benchmark']:.2%}<extra></extra>"
+            ),
+        )
+        fig_perf.add_scatter(
+            x=[prev_point["date_str"]],
+            y=[prev_point["Portafolio"]],
+            mode="markers",
+            marker=dict(size=5, color="#ff7875"),
+            name="Cierre anterior Portafolio",
+            showlegend=False,
+            hovertemplate=(
+                f"Fecha: {prev_point['date_str']}<br>"
+                f"Portafolio: {prev_point['Portafolio']:.2%}<extra></extra>"
+            ),
+        )
+        fig_perf.add_scatter(
+            x=[prev_point["date_str"]],
+            y=[prev_point["Benchmark"]],
+            mode="markers",
+            marker=dict(size=5, color="#ff7875"),
+            name="Cierre anterior Benchmark",
+            showlegend=False,
+            hovertemplate=(
+                f"Fecha: {prev_point['date_str']}<br>"
+                f"Benchmark: {prev_point['Benchmark']:.2%}<extra></extra>"
+            ),
+        )
     st.plotly_chart(fig_perf, use_container_width=True)
 else:
     st.info("No hay suficientes datos para comparar con el benchmark.")
