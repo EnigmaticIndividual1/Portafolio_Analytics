@@ -62,7 +62,6 @@ latest_asof = latest_prices.attrs.get("asof")
 missing_prices = latest_prices[latest_prices.isna()].index.tolist()
 available_prices = latest_prices.dropna()
 if missing_prices:
-    st.warning(f"Sin precio en Yahoo Finance para: {missing_prices}. Se omiten temporalmente.")
     positions = positions[~positions["ticker"].isin(missing_prices)]
     tickers = positions["ticker"].unique().tolist()
     all_tickers = tickers + [SETTINGS.benchmark]
