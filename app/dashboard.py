@@ -234,16 +234,18 @@ if year_filter != "Todos":
 if len(daily_value_market_full) >= 1:
     base_value = float(daily_value_market_full.iloc[-1])
     base_date = daily_value_market_full.index[-1]
-    live_pnl = total_value - base_value
-    live_pnl_pct = (live_pnl / base_value) * 100.0 if base_value else 0.0
     if len(daily_value_market_full) >= 2:
         prev_value = float(daily_value_market_full.iloc[-2])
         prev_date = daily_value_market_full.index[-2]
         last_close_pnl = base_value - prev_value
+        live_pnl = last_close_pnl
+        live_pnl_pct = (live_pnl / prev_value) * 100.0 if prev_value else 0.0
     else:
         prev_value = float("nan")
         prev_date = None
         last_close_pnl = 0.0
+        live_pnl = 0.0
+        live_pnl_pct = 0.0
 else:
     live_pnl = 0.0
     live_pnl_pct = 0.0
@@ -306,12 +308,75 @@ if not filtered_holdings.empty:
             return ""
         return "color: #52c41a;" if val > 0 else ("color: #ff4d4f;" if val < 0 else "")
 
-    styler = filtered_holdings.style
+    display_holdings = filtered_holdings.copy()
+    display_holdings.columns = [c.replace("_", " ").title() for c in display_holdings.columns]
+    center_styles = [
+        {"selector": "table", "props": [("margin", "0 auto")]},
+        {"selector": "th, td", "props": [("text-align", "center"), ("font-size", "0.9rem")]},
+        {"selector": "thead th", "props": [("text-align", "center")]},
+        {"selector": "tbody th", "props": [("text-align", "center")]},
+        {"selector": ".row_heading", "props": [("text-align", "center")]},
+        {"selector": ".col_heading", "props": [("text-align", "center")]},
+        {"selector": ".index_name", "props": [("text-align", "center")]},
+        {"selector": ".blank", "props": [("text-align", "center")]},
+    ]
+    styler = display_holdings.style
+    styler = styler.set_properties(**{"text-align": "center"}, subset=pd.IndexSlice[:, :])
+    styler = styler.set_table_styles(center_styles)
+    format_map = {}
+    for col in display_holdings.columns:
+        if not pd.api.types.is_numeric_dtype(display_holdings[col]):
+            continue
+        if "Pct" in col:
+            format_map[col] = "{:.2f}%"
+        elif any(k in col for k in ["Price", "Value", "Pnl"]):
+            format_map[col] = "${:,.2f}"
+        else:
+            format_map[col] = "{:.2f}"
+    if format_map:
+        styler = styler.format(format_map)
     if "pnl" in filtered_holdings.columns:
-        styler = styler.applymap(_pnl_color, subset=["pnl"])
+        styler = styler.applymap(_pnl_color, subset=["Pnl"])
     if "pnl_pct" in filtered_holdings.columns:
-        styler = styler.applymap(_pnl_color, subset=["pnl_pct"])
+        styler = styler.applymap(_pnl_color, subset=["Pnl Pct"])
     st.dataframe(styler, use_container_width=True)
+    weights_pct = filtered_holdings.set_index("ticker")["weight_pct"]
+    hhi = float((weights_pct / 100.0).pow(2).sum())
+    st.caption(f"HHI (concentración): {hhi:.3f}")
+
+    st.subheader("📈 Tickets en vivo")
+    prev_close = price_history[tickers].ffill().iloc[-2] if len(price_history) >= 2 else pd.Series(dtype=float)
+    qty_map = positions.set_index("ticker")["quantity"]
+    live_view = pd.DataFrame({
+        "ticker": filtered_holdings["ticker"],
+    })
+    live_view["precio_actual"] = live_view["ticker"].map(available_prices)
+    live_view["precio_prev"] = live_view["ticker"].map(prev_close)
+    live_view["cantidad"] = live_view["ticker"].map(qty_map)
+    live_view["valor_portafolio"] = live_view["precio_actual"] * live_view["cantidad"]
+    live_view["ganancia"] = (live_view["precio_actual"] - live_view["precio_prev"]) * live_view["cantidad"]
+    live_view["ganancia_pct"] = (
+        (live_view["precio_actual"] - live_view["precio_prev"]) / live_view["precio_prev"]
+    ) * 100.0
+    live_view = live_view.drop(columns=["precio_prev", "cantidad"]).sort_values("ganancia", ascending=False)
+    live_view.columns = [c.replace("_", " ").title() for c in live_view.columns]
+    live_styler = live_view.style
+    live_styler = live_styler.set_properties(**{"text-align": "center"}, subset=pd.IndexSlice[:, :])
+    live_styler = live_styler.set_table_styles(center_styles)
+    live_format = {}
+    for col in live_view.columns:
+        if not pd.api.types.is_numeric_dtype(live_view[col]):
+            continue
+        if "Pct" in col:
+            live_format[col] = "{:.2f}%"
+        elif any(k in col for k in ["Precio", "Valor", "Ganancia"]):
+            live_format[col] = "${:,.2f}"
+        else:
+            live_format[col] = "{:.2f}"
+    if live_format:
+        live_styler = live_styler.format(live_format)
+    live_styler = live_styler.applymap(_pnl_color, subset=["Ganancia", "Ganancia Pct"])
+    st.dataframe(live_styler, use_container_width=True)
 else:
     st.dataframe(filtered_holdings, use_container_width=True)
 
@@ -368,6 +433,7 @@ if len(daily_value_market) >= 1:
             daily_df,
             x="date_str",
             y="close",
+            markers=True,
             labels={"close": "Cierre diario", "date_str": "Fecha"},
         )
         with avg_col:
@@ -427,6 +493,16 @@ if len(daily_value_market) >= 1:
             ),
             customdata=daily_df[["open", "close", "pl", "date_str"]].values,
         )
+        fig_close.update_traces(
+            marker=dict(size=7, color="#ff4d4f"),
+            hovertemplate=(
+                "Fecha: %{customdata[3]}<br>"
+                "Open (prev cierre): %{customdata[0]:.2f}<br>"
+                "Close: %{customdata[1]:.2f}<br>"
+                "P/L: %{customdata[2]:.2f}<extra></extra>"
+            ),
+            customdata=daily_df[["open", "close", "pl", "date_str"]].values,
+        )
         last_row = daily_df.iloc[-1]
         fig_close.add_scatter(
             x=[last_row["date_str"]],
@@ -435,29 +511,13 @@ if len(daily_value_market) >= 1:
             text=[f"P/L cierre: {last_row['pl']:.2f}"],
             textposition="top right",
             marker=dict(size=8, color="#ff4d4f"),
-            name="Ultimo cierre",
             showlegend=False,
-            hovertemplate=(
-                f"Fecha: {last_row['date_str']}<br>"
-                f"Cierre: {last_row['close']:.2f}<br>"
-                f"P/L: {last_row['pl']:.2f}<extra></extra>"
-            ),
         )
-        if len(daily_df) >= 2:
-            prev_row = daily_df.iloc[-2]
-            fig_close.add_scatter(
-                x=[prev_row["date_str"]],
-                y=[prev_row["close"]],
-                mode="markers",
-                marker=dict(size=6, color="#ff4d4f"),
-                name="Cierre anterior",
-                showlegend=False,
-                hovertemplate=(
-                    f"Fecha: {prev_row['date_str']}<br>"
-                    f"Cierre: {prev_row['close']:.2f}<br>"
-                    f"P/L: {prev_row['pl']:.2f}<extra></extra>"
-                ),
-            )
+        if not daily_df.empty:
+            min_close = float(daily_df["close"].min())
+            max_close = float(daily_df["close"].max())
+            pad = (max_close - min_close) * 0.1 if max_close != min_close else 1.0
+            fig_close.update_yaxes(range=[min_close - pad, max_close + pad])
     st.plotly_chart(fig_close, use_container_width=True)
 else:
     st.info("No hay suficientes cierres para graficar P/L diario.")
@@ -511,6 +571,7 @@ if not portfolio_ret.empty and not benchmark_ret.empty:
         perf_df,
         x="date_str",
         y=["Portafolio", "Benchmark"],
+        markers=True,
         labels={"value": "Retorno acumulado", "date_str": "Fecha", "variable": "Serie"},
     )
     fig_perf.update_yaxes(tickformat=".1%")
@@ -519,94 +580,15 @@ if not portfolio_ret.empty and not benchmark_ret.empty:
         max_val = max(perf_df["Portafolio"].max(), perf_df["Benchmark"].max())
         pad = (max_val - min_val) * 0.1 if max_val != min_val else 0.005
         fig_perf.update_yaxes(range=[min_val - pad, max_val + pad])
-    if len(perf_df) >= 2:
-        last_point = perf_df.iloc[-1]
-        prev_point = perf_df.iloc[-2]
-        fig_perf.add_scatter(
-            x=[last_point["date_str"]],
-            y=[last_point["Portafolio"]],
-            mode="markers",
-            marker=dict(size=6, color="#ff4d4f"),
-            name="Cierre Portafolio",
-            showlegend=False,
-            hovertemplate=(
-                f"Fecha: {last_point['date_str']}<br>"
-                f"Portafolio: {last_point['Portafolio']:.2%}<extra></extra>"
-            ),
-        )
-        fig_perf.add_scatter(
-            x=[last_point["date_str"]],
-            y=[last_point["Benchmark"]],
-            mode="markers",
-            marker=dict(size=6, color="#ff4d4f"),
-            name="Cierre Benchmark",
-            showlegend=False,
-            hovertemplate=(
-                f"Fecha: {last_point['date_str']}<br>"
-                f"Benchmark: {last_point['Benchmark']:.2%}<extra></extra>"
-            ),
-        )
-        fig_perf.add_scatter(
-            x=[prev_point["date_str"]],
-            y=[prev_point["Portafolio"]],
-            mode="markers",
-            marker=dict(size=5, color="#ff7875"),
-            name="Cierre anterior Portafolio",
-            showlegend=False,
-            hovertemplate=(
-                f"Fecha: {prev_point['date_str']}<br>"
-                f"Portafolio: {prev_point['Portafolio']:.2%}<extra></extra>"
-            ),
-        )
-        fig_perf.add_scatter(
-            x=[prev_point["date_str"]],
-            y=[prev_point["Benchmark"]],
-            mode="markers",
-            marker=dict(size=5, color="#ff7875"),
-            name="Cierre anterior Benchmark",
-            showlegend=False,
-            hovertemplate=(
-                f"Fecha: {prev_point['date_str']}<br>"
-                f"Benchmark: {prev_point['Benchmark']:.2%}<extra></extra>"
-            ),
-        )
+    fig_perf.update_traces(
+        marker=dict(size=6, color="#ff4d4f"),
+        hovertemplate="%{x}<br>%{y:.2%}<extra></extra>",
+    )
     st.plotly_chart(fig_perf, use_container_width=True)
 else:
     st.info("No hay suficientes datos para comparar con el benchmark.")
 
-st.caption("Concentración y diversificación")
-if not filtered_holdings.empty:
-    if year_filter != "Todos":
-        st.caption("Basado en holdings actuales (sin histórico por año).")
-    weights_pct = filtered_holdings.set_index("ticker")["weight_pct"]
-    top_weights = weights_pct.sort_values(ascending=False).head(5).reset_index()
-    top_weights.columns = ["ticker", "weight_pct"]
-    hhi = float((weights_pct / 100.0).pow(2).sum())
-    col_c1, col_c2 = st.columns(2)
-    col_c1.dataframe(top_weights, use_container_width=True)
-    col_c2.metric("HHI (concentración)", f"{hhi:.3f}")
-    if weights_pct.max() > 30:
-        st.warning("Concentración alta: un activo supera 30% del portafolio.")
-else:
-    st.info("No hay holdings para calcular concentración.")
 
-st.caption("Distribución por clase")
-if "asset_class" in filtered_holdings.columns:
-    if year_filter != "Todos":
-        st.caption("Basado en holdings actuales (sin histórico por año).")
-    class_df = (
-        filtered_holdings.groupby("asset_class", as_index=False)["market_value"]
-        .sum()
-        .sort_values("market_value", ascending=False)
-    )
-    fig_class = px.pie(
-        class_df,
-        names="asset_class",
-        values="market_value",
-    )
-    st.plotly_chart(fig_class, use_container_width=True)
-else:
-    st.info("No hay columna asset_class para agrupar por clase.")
 
 st.caption("Riesgo y alertas")
 if not portfolio_ret.empty:
