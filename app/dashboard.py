@@ -7,7 +7,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import os
-from pathlib import Path
+import plotly.express as px
 import src.config as config
 import src.data_io as data_io
 from src.market_data import get_latest_prices, get_price_history
@@ -102,8 +102,28 @@ pnl_total_pct = (total_pnl / total_cost) * 100.0 if total_cost else 0.0
 ann_ret = annualized_return(portfolio_ret)
 sharpe = sharpe_ratio(portfolio_ret, SETTINGS.risk_free_rate_annual)
 
+def compute_xirr(cashflows: list[tuple[pd.Timestamp, float]]) -> float:
+    if len(cashflows) < 2:
+        return float("nan")
+    cashflows = sorted(cashflows, key=lambda x: x[0])
+    t0 = cashflows[0][0]
+    times = np.array([(cf_date - t0).days / 365.0 for cf_date, _ in cashflows], dtype=float)
+    amounts = np.array([cf_amt for _, cf_amt in cashflows], dtype=float)
+    guess = 0.1
+    for _ in range(100):
+        denom = (1.0 + guess) ** times
+        f = np.sum(amounts / denom)
+        df = np.sum(-times * amounts / denom / (1.0 + guess))
+        if df == 0:
+            break
+        new_guess = guess - f / df
+        if abs(new_guess - guess) < 1e-8:
+            return float(new_guess)
+        guess = new_guess
+    return float("nan")
+
 # --- Layout ---
-col1, col2, col3, col4, col5 = st.columns(5)
+col1, col2, col3, col4, col5, col6 = st.columns([1.6, 1.3, 1.3, 1.3, 1.1, 1.3])
 
 col1.metric("Valor total", f"${total_value:,.2f}")
 col2.metric("P/L total", f"${total_pnl:,.2f}")
@@ -130,8 +150,41 @@ col5.markdown(
     f"<div style='font-size:2rem; font-weight:600; color:{sharpe_color};'>{sharpe:.2f}</div>",
     unsafe_allow_html=True,
 )
+transactions_path = ROOT_DIR / "data" / "transactions.csv"
+if transactions_path.exists():
+    tx_df = pd.read_csv(transactions_path)
+    tx_df["date"] = pd.to_datetime(tx_df["date"])
+    tx_df["total"] = pd.to_numeric(tx_df["total"], errors="coerce")
+    cashflows = [(d, -amt) for d, amt in zip(tx_df["date"], tx_df["total"]) if pd.notna(amt)]
+    cashflows.append((pd.Timestamp.today().normalize(), float(total_value)))
+    xirr = compute_xirr(cashflows)
+else:
+    tx_df = pd.DataFrame()
+    xirr = float("nan")
+
+col6.markdown(
+    "<div style='font-size:0.9rem; color:#9e9e9e;'>XIRR anual</div>"
+    f"<div style='font-size:2rem; font-weight:600; color:#52c41a;'>{xirr*100:.2f}%</div>",
+    unsafe_allow_html=True,
+)
 if last_market_update is not None:
-    st.caption(f"Última actualización de mercado: {last_market_update.strftime('%Y-%m-%d %H:%M:%S')}")
+    now_ts = pd.Timestamp.now()
+    in_market_day = now_ts.weekday() <= 4
+    start_time = now_ts.replace(hour=7, minute=30, second=0, microsecond=0)
+    end_time = now_ts.replace(hour=15, minute=0, second=0, microsecond=0)
+    in_market_hours = in_market_day and start_time <= now_ts <= end_time
+    if in_market_hours:
+        merged_ts = last_market_update.replace(
+            hour=now_ts.hour,
+            minute=now_ts.minute,
+            second=now_ts.second,
+            microsecond=0,
+        )
+    else:
+        merged_ts = last_market_update
+    st.caption(
+        f"Última actualización de mercado: {merged_ts.strftime('%Y-%m-%d %H:%M:%S')}"
+    )
 
 hist_pnl_df = pd.DataFrame()
 hist_pnl_full = pd.DataFrame()
@@ -299,8 +352,6 @@ if base_date is not None:
             + f" ({source_label})"
         )
 
-st.divider()
-
 st.subheader("📋 Holdings")
 if not filtered_holdings.empty:
     def _pnl_color(val):
@@ -377,6 +428,54 @@ if not filtered_holdings.empty:
         live_styler = live_styler.format(live_format)
     live_styler = live_styler.applymap(_pnl_color, subset=["Ganancia", "Ganancia Pct"])
     st.dataframe(live_styler, use_container_width=True)
+
+    if not tx_df.empty:
+        with st.expander("📑 Flujos para XIRR", expanded=False):
+            tx_view = tx_df.copy()
+            tx_view["total"] = tx_view["total"].astype(float)
+            tx_view = tx_view.rename(
+                columns={
+                    "date": "Fecha",
+                    "stock": "Ticker",
+                    "quantity": "Cantidad",
+                    "price": "Precio",
+                    "total": "Total",
+                }
+            )
+            tx_view["Fecha"] = tx_view["Fecha"].dt.strftime("%Y-%m-%d")
+            tx_view.columns = [c.replace("_", " ").title() for c in tx_view.columns]
+            tx_styler = tx_view.style
+            tx_styler = tx_styler.set_table_styles(center_styles)
+            tx_format = {}
+            for col in tx_view.columns:
+                if not pd.api.types.is_numeric_dtype(tx_view[col]):
+                    continue
+                if col in ["Precio", "Total"]:
+                    tx_format[col] = "${:,.2f}"
+                else:
+                    tx_format[col] = "{:.2f}"
+            if tx_format:
+                tx_styler = tx_styler.format(tx_format)
+            st.dataframe(tx_styler, use_container_width=True)
+
+            cf_df = pd.DataFrame(cashflows, columns=["date", "amount"])
+            cf_df = cf_df.sort_values("date")
+            cf_df["cumulative"] = cf_df["amount"].cumsum()
+            cf_df["date_str"] = cf_df["date"].dt.strftime("%Y-%m-%d")
+            fig_cf = px.line(
+                cf_df,
+                x="date_str",
+                y="cumulative",
+                markers=True,
+                labels={"cumulative": "Flujo acumulado", "date_str": "Fecha"},
+            )
+            fig_cf.update_traces(
+                marker=dict(size=6, color="#ff4d4f"),
+                hovertemplate="Fecha: %{x}<br>Flujo acumulado: %{y:.2f}<extra></extra>",
+            )
+            st.plotly_chart(fig_cf, use_container_width=True)
+    else:
+        st.info("No hay transacciones para calcular XIRR.")
 else:
     st.dataframe(filtered_holdings, use_container_width=True)
 
