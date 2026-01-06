@@ -97,15 +97,22 @@ portfolio_ret = portfolio_returns(asset_rets, weights)
 # --- Métricas clave ---
 total_value = holdings["market_value"].sum()
 total_pnl = holdings["pnl"].sum()
+total_cost = holdings["cost_value"].sum() if "cost_value" in holdings.columns else float("nan")
+pnl_total_pct = (total_pnl / total_cost) * 100.0 if total_cost else 0.0
 ann_ret = annualized_return(portfolio_ret)
 sharpe = sharpe_ratio(portfolio_ret, SETTINGS.risk_free_rate_annual)
 
 # --- Layout ---
-col1, col2, col3, col4 = st.columns(4)
+col1, col2, col3, col4, col5 = st.columns(5)
 
 col1.metric("Valor total", f"${total_value:,.2f}")
 col2.metric("P/L total", f"${total_pnl:,.2f}")
-col3.metric("Retorno anual (est.)", f"{ann_ret*100:.2f}%")
+col3.markdown(
+    "<div style='font-size:0.9rem; color:#9e9e9e;'>P/L total (%)</div>"
+    f"<div style='font-size:2rem; font-weight:600; color:#52c41a;'>{pnl_total_pct:.2f}%</div>",
+    unsafe_allow_html=True,
+)
+col4.metric("Retorno anual (est.)", f"{ann_ret*100:.2f}%")
 sharpe_color = "#9e9e9e"
 if pd.notna(sharpe):
     if sharpe < 0.5:
@@ -118,7 +125,7 @@ if pd.notna(sharpe):
         sharpe_color = "#1890ff"
     else:
         sharpe_color = "#722ed1"
-col4.markdown(
+col5.markdown(
     f"<div style='font-size:0.9rem; color:#9e9e9e;'>Sharpe</div>"
     f"<div style='font-size:2rem; font-weight:600; color:{sharpe_color};'>{sharpe:.2f}</div>",
     unsafe_allow_html=True,
@@ -127,6 +134,7 @@ if last_market_update is not None:
     st.caption(f"Última actualización de mercado: {last_market_update.strftime('%Y-%m-%d %H:%M:%S')}")
 
 hist_pnl_df = pd.DataFrame()
+hist_pnl_full = pd.DataFrame()
 if hasattr(SETTINGS, "historical_pnl_path") and SETTINGS.historical_pnl_path.exists():
     hist_raw = pd.read_csv(SETTINGS.historical_pnl_path, sep="\t")
     hist_raw.columns = [c.strip() for c in hist_raw.columns]
@@ -147,8 +155,8 @@ if hasattr(SETTINGS, "historical_pnl_path") and SETTINGS.historical_pnl_path.exi
                 .replace("", np.nan)
                 .astype(float)
             )
-        hist_pnl_df = hist_raw.dropna(subset=["date"]).sort_values("date")
-        hist_pnl_df = hist_pnl_df[hist_pnl_df["date"] >= pd.Timestamp(cutoff_date)]
+        hist_pnl_full = hist_raw.dropna(subset=["date"]).sort_values("date")
+        hist_pnl_df = hist_pnl_full[hist_pnl_full["date"] >= pd.Timestamp(cutoff_date)]
 
 manual_daily_pnl = None
 prices_hist = price_history[selected_tickers].copy()
@@ -171,6 +179,37 @@ if latest_asof is not None:
         daily_value_market_full.loc[latest_asof] = float(latest_total)
         daily_value_market_full = daily_value_market_full.sort_index()
         daily_value_market = daily_value_market_full.loc[daily_value_market_full.index >= pd.Timestamp(cutoff_date)]
+
+active_year = int(year_filter) if year_filter != "Todos" else 2026
+year_series = daily_value_market_full.loc[daily_value_market_full.index.year == active_year]
+if len(year_series) >= 1:
+    year_first = float(year_series.iloc[0])
+    year_last = float(year_series.iloc[-1])
+    prev_close_series = daily_value_market_full.loc[daily_value_market_full.index < pd.Timestamp(active_year, 1, 1)]
+    if not prev_close_series.empty:
+        prev_close = float(prev_close_series.iloc[-1])
+        year_pl = year_last - prev_close
+        year_pl_pct = (year_pl / prev_close) * 100.0 if prev_close else 0.0
+    else:
+        year_pl = year_last - year_first
+        year_pl_pct = (year_pl / year_first) * 100.0 if year_first else 0.0
+else:
+    year_pl = 0.0
+    year_pl_pct = 0.0
+year_color = "#52c41a" if year_pl > 0 else ("#ff4d4f" if year_pl < 0 else "#9e9e9e")
+year_pct_color = "#52c41a" if year_pl_pct > 0 else ("#ff4d4f" if year_pl_pct < 0 else "#9e9e9e")
+
+col_y1, col_y2 = st.columns(2)
+col_y1.markdown(
+    f"<div style='font-size:0.9rem; color:#9e9e9e;'>P/L {active_year}</div>"
+    f"<div style='font-size:2rem; font-weight:600; color:{year_color};'>${year_pl:,.2f}</div>",
+    unsafe_allow_html=True,
+)
+col_y2.markdown(
+    f"<div style='font-size:0.9rem; color:#9e9e9e;'>P/L {active_year} (%)</div>"
+    f"<div style='font-size:2rem; font-weight:600; color:{year_pct_color};'>{year_pl_pct:.2f}%</div>",
+    unsafe_allow_html=True,
+)
 
 if not hist_pnl_df.empty:
     daily_value_full = hist_pnl_df.set_index("date")["Total Cierre"].copy()
@@ -347,8 +386,14 @@ if len(daily_value_market) >= 1:
                 if len(ytd_series) >= 1:
                     range_first = float(ytd_series.iloc[0])
                     range_last = float(ytd_series.iloc[-1])
-                    range_pl = range_last - range_first if len(ytd_series) >= 2 else 0.0
-                    range_pl_pct = (range_pl / range_first) if range_first else 0.0
+                    prev_close_series = daily_value_market_full.loc[daily_value_market_full.index < year_start]
+                    if not prev_close_series.empty:
+                        prev_close = float(prev_close_series.iloc[-1])
+                        range_pl = range_last - prev_close
+                        range_pl_pct = (range_pl / prev_close) if prev_close else 0.0
+                    else:
+                        range_pl = range_last - range_first if len(ytd_series) >= 2 else 0.0
+                        range_pl_pct = (range_pl / range_first) if range_first else 0.0
                 else:
                     range_pl = 0.0
                     range_pl_pct = 0.0
@@ -357,6 +402,21 @@ if len(daily_value_market) >= 1:
                 range_last = close_series.iloc[-1] if len(close_series) >= 1 else float("nan")
                 range_pl = range_last - range_first if len(close_series) >= 2 else 0.0
                 range_pl_pct = (range_pl / range_first) if range_first else 0.0
+                if range_label == "1M":
+                    year_start = pd.Timestamp(last_date.year, 1, 1)
+                    first_trading = daily_value_market_full.loc[daily_value_market_full.index >= year_start]
+                    if not first_trading.empty and close_series.index.min() == first_trading.index.min():
+                        prev_close_series = daily_value_market_full.loc[daily_value_market_full.index < year_start]
+                        if not prev_close_series.empty:
+                            prev_close = float(prev_close_series.iloc[-1])
+                            range_pl = range_last - prev_close
+                            range_pl_pct = (range_pl / prev_close) if prev_close else 0.0
+                if range_label == "ALL":
+                    prev_close_series = daily_value_market_full.loc[daily_value_market_full.index < pd.Timestamp(cutoff_date)]
+                    if not prev_close_series.empty:
+                        prev_close = float(prev_close_series.iloc[-1])
+                        range_pl = range_last - prev_close
+                        range_pl_pct = (range_pl / prev_close) if prev_close else 0.0
             st.metric(f"P/L {range_label}", f"${range_pl:,.2f}", delta=f"{range_pl_pct:.2%}")
         fig_close.update_traces(
             hovertemplate=(
@@ -406,32 +466,47 @@ st.subheader("🧭 Seguimiento avanzado")
 
 st.caption("Benchmark vs Portafolio")
 if not portfolio_ret.empty and not benchmark_ret.empty:
-    aligned = pd.concat([portfolio_ret, benchmark_ret], axis=1).dropna()
+    port_series = daily_value_market_full.copy()
+    bench_series = price_history[SETTINGS.benchmark].copy()
+    bench_series.index = pd.to_datetime(bench_series.index)
+    if bench_series.index.tz is not None:
+        bench_series.index = bench_series.index.tz_localize(None)
+    aligned = pd.concat([port_series, bench_series], axis=1).dropna()
+    aligned.columns = ["portfolio_value", "benchmark_close"]
     aligned = aligned.loc[aligned.index >= pd.Timestamp(cutoff_date)]
-    aligned.columns = ["portfolio", "benchmark"]
-    cum_port = (1.0 + aligned["portfolio"]).cumprod() - 1.0
-    cum_bench = (1.0 + aligned["benchmark"]).cumprod() - 1.0
-    perf_df = pd.DataFrame(
-        {
-            "date": aligned.index,
-            "Portafolio": cum_port.values,
-            "Benchmark": cum_bench.values,
-        }
-    )
+    if year_filter != "Todos":
+        aligned = aligned[aligned.index.year == int(year_filter)]
+    if len(aligned) >= 1:
+        first_date = aligned.index[0]
+        prev_port = daily_value_market_full.loc[daily_value_market_full.index < first_date]
+        prev_bench = bench_series.loc[bench_series.index < first_date]
+        base_port = float(prev_port.iloc[-1]) if not prev_port.empty else float(aligned["portfolio_value"].iloc[0])
+        base_bench = float(prev_bench.iloc[-1]) if not prev_bench.empty else float(aligned["benchmark_close"].iloc[0])
+        cum_port = (aligned["portfolio_value"] / base_port) - 1.0
+        cum_bench = (aligned["benchmark_close"] / base_bench) - 1.0
+        perf_df = pd.DataFrame(
+            {
+                "date": aligned.index,
+                "Portafolio": cum_port.values,
+                "Benchmark": cum_bench.values,
+            }
+        )
+    else:
+        perf_df = pd.DataFrame(columns=["date", "Portafolio", "Benchmark"])
     perf_df["date_str"] = perf_df["date"].dt.strftime("%d %b %Y")
-    if not aligned.empty:
-        if len(daily_value_market_full) >= 2:
-            last_close = float(daily_value_market_full.iloc[-1])
-            prev_close = float(daily_value_market_full.iloc[-2])
-            last_port_ret = (last_close - prev_close) / prev_close if prev_close else 0.0
-        else:
-            last_port_ret = 0.0
-        last_bench_ret = float(aligned.iloc[-1]["benchmark"])
+    if len(aligned) >= 2:
+        last_close = float(aligned["portfolio_value"].iloc[-1])
+        prev_close = float(aligned["portfolio_value"].iloc[-2])
+        last_port_ret = (last_close - prev_close) / prev_close if prev_close else 0.0
+        last_bench_ret = float((aligned["benchmark_close"].iloc[-1] - aligned["benchmark_close"].iloc[-2]) / aligned["benchmark_close"].iloc[-2])
         delta_perf = last_port_ret - last_bench_ret
         col_b1, col_b2, col_b3 = st.columns(3)
         col_b1.metric("Retorno último cierre (Portafolio)", f"{last_port_ret:.2%}")
         col_b2.metric("Retorno último cierre (Benchmark)", f"{last_bench_ret:.2%}")
         col_b3.metric("Delta vs Benchmark", f"{delta_perf:.2%}")
+        st.caption(f"Base acumulado: Portafolio ${base_port:,.2f} · Benchmark ${base_bench:,.2f}")
+    else:
+        st.info("No hay suficientes cierres para comparar con benchmark.")
     fig_perf = px.line(
         perf_df,
         x="date_str",
@@ -439,6 +514,11 @@ if not portfolio_ret.empty and not benchmark_ret.empty:
         labels={"value": "Retorno acumulado", "date_str": "Fecha", "variable": "Serie"},
     )
     fig_perf.update_yaxes(tickformat=".1%")
+    if not perf_df.empty:
+        min_val = min(perf_df["Portafolio"].min(), perf_df["Benchmark"].min())
+        max_val = max(perf_df["Portafolio"].max(), perf_df["Benchmark"].max())
+        pad = (max_val - min_val) * 0.1 if max_val != min_val else 0.005
+        fig_perf.update_yaxes(range=[min_val - pad, max_val + pad])
     if len(perf_df) >= 2:
         last_point = perf_df.iloc[-1]
         prev_point = perf_df.iloc[-2]
