@@ -476,6 +476,226 @@ if not filtered_holdings.empty:
             st.plotly_chart(fig_cf, use_container_width=True)
     else:
         st.info("No hay transacciones para calcular XIRR.")
+
+    with st.expander("📅 Histórico real (transacciones)", expanded=False):
+        if tx_df.empty:
+            st.info("No hay transacciones para construir el histórico real.")
+        else:
+            hist_prices = price_history[tickers].ffill().dropna(how="all")
+            tx_hist = tx_df.copy()
+            tx_hist["stock"] = tx_hist["stock"].astype(str).str.upper().str.strip()
+            tx_hist["date"] = pd.to_datetime(tx_hist["date"])
+            tx_hist["quantity"] = pd.to_numeric(tx_hist["quantity"], errors="coerce")
+            tx_hist["price"] = pd.to_numeric(tx_hist["price"], errors="coerce")
+            tx_hist["total"] = pd.to_numeric(tx_hist["total"], errors="coerce")
+            tx_hist = tx_hist.dropna(subset=["date", "stock", "quantity", "price", "total"])
+            tx_daily = tx_hist.groupby(["date", "stock"], as_index=False)["quantity"].sum()
+            qty_matrix = (
+                tx_daily.pivot(index="date", columns="stock", values="quantity")
+                .reindex(hist_prices.index)
+                .fillna(0.0)
+                .cumsum()
+            )
+            qty_matrix = qty_matrix.reindex(columns=hist_prices.columns, fill_value=0.0)
+            if not tx_hist.empty:
+                first_tx_date = tx_hist["date"].min()
+                qty_matrix = qty_matrix.loc[qty_matrix.index >= first_tx_date]
+            port_value = (qty_matrix * hist_prices).sum(axis=1)
+            port_value = port_value.dropna()
+            port_value = port_value[port_value > 0]
+
+            tx_detail = tx_hist.merge(
+                latest_prices.rename("price_live"),
+                left_on="stock",
+                right_index=True,
+                how="left",
+            )
+            tx_detail["pnl_current"] = (tx_detail["price_live"] - tx_detail["price"]) * tx_detail["quantity"]
+            tx_detail["pnl_current_pct"] = ((tx_detail["price_live"] / tx_detail["price"]) - 1.0) * 100.0
+
+            tx_table = tx_detail.copy()
+            tx_table["Fecha"] = tx_table["date"].dt.strftime("%Y-%m-%d")
+            tx_table = tx_table.rename(
+                columns={
+                    "stock": "Ticker",
+                    "quantity": "Cantidad",
+                    "price": "Precio Compra",
+                    "total": "Total",
+                    "price_live": "Precio Actual",
+                    "pnl_current": "P/L Actual",
+                    "pnl_current_pct": "P/L Actual %",
+                }
+            )
+            tx_table = tx_table[
+                [
+                    "Fecha",
+                    "Ticker",
+                    "Cantidad",
+                    "Precio Compra",
+                    "Total",
+                    "Precio Actual",
+                    "P/L Actual",
+                    "P/L Actual %",
+                ]
+            ]
+            tx_table = tx_table.sort_values(["Fecha", "Ticker"])
+
+            tx_table_styler = tx_table.style
+            tx_table_styler = tx_table_styler.set_table_styles(center_styles)
+            tx_table_format = {
+                "Precio Compra": "${:,.2f}",
+                "Total": "${:,.2f}",
+                "Precio Actual": "${:,.2f}",
+                "P/L Actual": "${:,.2f}",
+                "P/L Actual %": "{:.2f}%",
+                "Cantidad": "{:.4f}",
+            }
+            tx_table_styler = tx_table_styler.format(tx_table_format)
+            tx_table_styler = tx_table_styler.applymap(_pnl_color, subset=["P/L Actual", "P/L Actual %"])
+            st.dataframe(tx_table_styler, use_container_width=True)
+
+            net_cf = tx_hist.groupby("date")["total"].sum()
+            net_cf = net_cf.reindex(port_value.index).fillna(0.0)
+            invested_cum = net_cf.cumsum()
+
+            equity_df = pd.DataFrame(
+                {"Fecha": port_value.index, "Valor cartera": port_value.values}
+            )
+            equity_df["Fecha"] = equity_df["Fecha"].dt.strftime("%Y-%m-%d")
+            fig_equity = px.line(
+                equity_df,
+                x="Fecha",
+                y="Valor cartera",
+                markers=True,
+                labels={"Valor cartera": "Valor cartera", "Fecha": "Fecha"},
+            )
+            fig_equity.update_traces(
+                marker=dict(size=6, color="#ff4d4f"),
+                hovertemplate="Fecha: %{x}<br>Valor cartera: %{y:.2f}<extra></extra>",
+            )
+            st.plotly_chart(fig_equity, use_container_width=True)
+
+            port_value_filled = port_value.ffill()
+            market_change = port_value_filled.diff() - net_cf
+            market_change = market_change.dropna()
+            if not market_change.empty:
+                mc_df = pd.DataFrame(
+                    {
+                        "Fecha": market_change.index,
+                        "Cambio por mercado": market_change.values,
+                        "Valor cartera": port_value_filled.reindex(market_change.index).values,
+                        "Aportaciones netas": net_cf.reindex(market_change.index).values,
+                    }
+                )
+                mc_df["Fecha"] = mc_df["Fecha"].dt.strftime("%Y-%m-%d")
+                fig_change = px.line(
+                    mc_df,
+                    x="Fecha",
+                    y="Cambio por mercado",
+                    markers=True,
+                    labels={"Cambio por mercado": "Cambio por mercado", "Fecha": "Fecha"},
+                )
+                fig_change.update_traces(
+                    marker=dict(size=6, color="#ff4d4f"),
+                    customdata=mc_df[["Valor cartera", "Aportaciones netas"]].values,
+                    hovertemplate=(
+                        "Fecha: %{x}"
+                        "<br>Cambio por mercado: %{y:.2f}"
+                        "<br>Valor cartera: %{customdata[0]:.2f}"
+                        "<br>Aportaciones netas: %{customdata[1]:.2f}"
+                        "<extra></extra>"
+                    ),
+                )
+                st.plotly_chart(fig_change, use_container_width=True)
+
+            contrib_df = pd.DataFrame(
+                {"Fecha": invested_cum.index, "Aportaciones netas": invested_cum.values}
+            )
+            contrib_df["Fecha"] = contrib_df["Fecha"].dt.strftime("%Y-%m-%d")
+            fig_contrib = px.line(
+                contrib_df,
+                x="Fecha",
+                y="Aportaciones netas",
+                markers=True,
+                labels={"Aportaciones netas": "Aportaciones netas", "Fecha": "Fecha"},
+            )
+            fig_contrib.update_traces(
+                marker=dict(size=6, color="#ff4d4f"),
+                hovertemplate="Fecha: %{x}<br>Aportaciones netas: %{y:.2f}<extra></extra>",
+            )
+            st.plotly_chart(fig_contrib, use_container_width=True)
+
+            pnl_series = port_value - invested_cum
+            live_date = pd.to_datetime(latest_asof) if latest_asof is not None else port_value.index.max()
+            live_date = live_date.normalize()
+            pnl_base_live = invested_cum.iloc[-1]
+            live_pnl = total_value - pnl_base_live
+            pnl_series = pnl_series.copy()
+            if live_date in pnl_series.index:
+                pnl_series.loc[live_date] = live_pnl
+            else:
+                pnl_series = pd.concat([pnl_series, pd.Series({live_date: live_pnl})]).sort_index()
+            port_value_live = port_value.copy()
+            if live_date in port_value_live.index:
+                port_value_live.loc[live_date] = total_value
+            else:
+                port_value_live = pd.concat([port_value_live, pd.Series({live_date: total_value})]).sort_index()
+            invested_live = invested_cum.copy()
+            if live_date not in invested_live.index:
+                invested_live = pd.concat([invested_live, pd.Series({live_date: invested_cum.iloc[-1]})]).sort_index()
+
+            pnl_df = pd.DataFrame(
+                {
+                    "Fecha": pnl_series.index,
+                    "P/L acumulado": pnl_series.values,
+                    "Valor cartera": port_value_live.reindex(pnl_series.index).values,
+                    "Aportaciones": invested_live.reindex(pnl_series.index).values,
+                }
+            )
+            pnl_df["Fecha"] = pnl_df["Fecha"].dt.strftime("%Y-%m-%d")
+            fig_pnl = px.line(
+                pnl_df,
+                x="Fecha",
+                y="P/L acumulado",
+                markers=True,
+                labels={"P/L acumulado": "P/L acumulado", "Fecha": "Fecha"},
+            )
+            fig_pnl.update_traces(
+                marker=dict(size=6, color="#ff4d4f"),
+                customdata=pnl_df[["Valor cartera", "Aportaciones"]].values,
+                hovertemplate=(
+                    "Fecha: %{x}"
+                    "<br>Valor cartera: %{customdata[0]:.2f}"
+                    "<br>Aportaciones: %{customdata[1]:.2f}"
+                    "<br>P/L acumulado: %{y:.2f}"
+                    "<extra></extra>"
+                ),
+            )
+            st.plotly_chart(fig_pnl, use_container_width=True)
+
+            twr_base = port_value.shift(1)
+            twr_daily = ((port_value - net_cf) / twr_base) - 1.0
+            twr_daily = twr_daily.replace([np.inf, -np.inf], np.nan)
+            twr_daily = twr_daily.dropna()
+            twr_cum = (1.0 + twr_daily).cumprod() - 1.0
+            if not twr_cum.empty:
+                twr_df = pd.DataFrame(
+                    {"Fecha": twr_cum.index, "TWR acumulado %": twr_cum.values * 100.0}
+                )
+                twr_df["Fecha"] = twr_df["Fecha"].dt.strftime("%Y-%m-%d")
+                fig_twr = px.line(
+                    twr_df,
+                    x="Fecha",
+                    y="TWR acumulado %",
+                    markers=True,
+                    labels={"TWR acumulado %": "TWR acumulado (%)", "Fecha": "Fecha"},
+                )
+                fig_twr.update_traces(
+                    marker=dict(size=6, color="#ff4d4f"),
+                    hovertemplate="Fecha: %{x}<br>TWR acumulado: %{y:.2f}%<extra></extra>",
+                )
+                st.plotly_chart(fig_twr, use_container_width=True)
+
 else:
     st.dataframe(filtered_holdings, use_container_width=True)
 
