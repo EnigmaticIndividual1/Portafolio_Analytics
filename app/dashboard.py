@@ -158,9 +158,11 @@ if transactions_path.exists():
     cashflows = [(d, -amt) for d, amt in zip(tx_df["date"], tx_df["total"]) if pd.notna(amt)]
     cashflows.append((pd.Timestamp.today().normalize(), float(total_value)))
     xirr = compute_xirr(cashflows)
+    liquidity = 0.0
 else:
     tx_df = pd.DataFrame()
     xirr = float("nan")
+    liquidity = 0.0
 
 col6.markdown(
     "<div style='font-size:0.9rem; color:#9e9e9e;'>XIRR anual</div>"
@@ -252,7 +254,7 @@ else:
 year_color = "#52c41a" if year_pl > 0 else ("#ff4d4f" if year_pl < 0 else "#9e9e9e")
 year_pct_color = "#52c41a" if year_pl_pct > 0 else ("#ff4d4f" if year_pl_pct < 0 else "#9e9e9e")
 
-col_y1, col_y2 = st.columns(2)
+col_y1, col_y2, col_y3 = st.columns(3)
 col_y1.markdown(
     f"<div style='font-size:0.9rem; color:#9e9e9e;'>P/L {active_year}</div>"
     f"<div style='font-size:2rem; font-weight:600; color:{year_color};'>${year_pl:,.2f}</div>",
@@ -261,6 +263,12 @@ col_y1.markdown(
 col_y2.markdown(
     f"<div style='font-size:0.9rem; color:#9e9e9e;'>P/L {active_year} (%)</div>"
     f"<div style='font-size:2rem; font-weight:600; color:{year_pct_color};'>{year_pl_pct:.2f}%</div>",
+    unsafe_allow_html=True,
+)
+liquidity_color = "#52c41a" if liquidity > 0 else "#9e9e9e"
+col_y3.markdown(
+    "<div style='font-size:0.9rem; color:#9e9e9e;'>Liquidez</div>"
+    f"<div style='font-size:2rem; font-weight:600; color:{liquidity_color};'>${liquidity:,.2f}</div>",
     unsafe_allow_html=True,
 )
 
