@@ -12,9 +12,11 @@ class Settings:
     history_dir: Path = reports_dir / "history"
     snapshots_csv: Path = history_dir / "daily_snapshots.csv"
     snapshots_db: Path = history_dir / "daily_snapshots.sqlite"
+    holdings_snapshots_csv: Path = history_dir / "daily_holdings.csv"
     historical_pnl_path: Path = BASE_DIR / "data" / "historical_pnl.tsv"
+    benchmark_closes_path: Path = BASE_DIR / "data" / "benchmark_closes.csv"
 
-    benchmark: str = "SPY"
+    benchmark: str = "VOO"
     history_period: str = "1y"
     history_interval: str = "1d"
 
