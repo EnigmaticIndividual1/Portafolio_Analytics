@@ -12,16 +12,25 @@ import io
 import zipfile
 import plotly.express as px
 import plotly.graph_objects as go
+from streamlit_autorefresh import st_autorefresh
 import src.config as config
 import src.data_io as data_io
 import importlib
-from src.market_data import get_latest_prices, get_price_history
+import src.market_data as market_data
 from src.analytics import (
     compute_holdings_table,
     daily_returns,
     portfolio_returns,
     annualized_return,
     sharpe_ratio,
+)
+
+get_latest_prices = market_data.get_latest_prices
+get_price_history = market_data.get_price_history
+get_ticker_events = getattr(
+    market_data,
+    "get_ticker_events",
+    lambda _tickers: pd.DataFrame(columns=["ticker", "event", "date"]),
 )
 
 st.sidebar.header("⚙️ Configuración")
@@ -81,9 +90,32 @@ positions = data_io.load_positions(SETTINGS.positions_path)
 tickers = positions["ticker"].unique().tolist()
 all_tickers = tickers + [SETTINGS.benchmark]
 
+@st.cache_data(ttl=6 * 60 * 60)
+def _load_sidebar_events(tickers: list[str]) -> pd.DataFrame:
+    return get_ticker_events(tickers)
+
+with st.sidebar.expander("📅 Eventos", expanded=False):
+    event_df = _load_sidebar_events(tickers)
+    if event_df.empty:
+        st.caption("Sin eventos disponibles por ahora.")
+    else:
+        event_df = event_df.sort_values(["date", "ticker"])
+        event_df["date"] = pd.to_datetime(event_df["date"]).dt.strftime("%Y-%m-%d")
+        event_df.columns = ["Ticker", "Evento", "Fecha"]
+        st.dataframe(event_df, use_container_width=True, hide_index=True)
+
 # --- Precios actuales ---
 latest_prices = get_latest_prices(all_tickers)
 latest_asof = latest_prices.attrs.get("asof")
+fx_usdmxn = None
+fx_asof = None
+try:
+    fx_series = get_latest_prices(["MXN=X"])
+    fx_usdmxn = float(fx_series.iloc[0])
+    fx_asof = fx_series.attrs.get("asof")
+except Exception:
+    fx_usdmxn = None
+    fx_asof = None
 missing_prices = latest_prices[latest_prices.isna()].index.tolist()
 available_prices = latest_prices.dropna()
 benchmark_price = latest_prices.get(SETTINGS.benchmark)
@@ -164,6 +196,8 @@ if last_market_update is not None:
     market_open = in_market_day and start_time <= now_ts <= end_time
 status_color = "#52c41a" if market_open else "#ff4d4f"
 status_class = "market-open" if market_open else "market-closed"
+if market_open:
+    st_autorefresh(interval=5 * 60 * 1000, key="auto_refresh_5min")
 st.markdown(
     """
     <style>
@@ -511,7 +545,18 @@ col_y4.markdown(
     "</div>",
     unsafe_allow_html=True,
 )
-col_y5.markdown("<div style='height:110px;'></div>", unsafe_allow_html=True)
+if fx_usdmxn is not None:
+    fx_label = f"{fx_usdmxn:,.2f}"
+else:
+    fx_label = "—"
+col_y5.markdown(
+    "<div style='height:110px; display:flex; flex-direction:column; align-items:flex-start; justify-content:space-between; padding-left:6px;'>"
+    "<div style='font-size:0.9rem; color:#9e9e9e;'>USD/MXN</div>"
+    f"<div style='font-size:2rem; font-weight:600; color:#e0e0e0;'>{fx_label}</div>"
+    "<div style='height:24px;'></div>"
+    "</div>",
+    unsafe_allow_html=True,
+)
 col_y6.markdown("<div style='height:110px;'></div>", unsafe_allow_html=True)
 
 if not hist_pnl_df.empty:
