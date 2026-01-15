@@ -384,44 +384,47 @@ if hasattr(SETTINGS, "historical_pnl_path") and SETTINGS.historical_pnl_path.exi
         hist_pnl_full = hist_raw.dropna(subset=["_date"]).sort_values("_date")
         hist_pnl_full["date"] = hist_pnl_full["_date"]
         if not hist_pnl_full.empty:
-            live_day = pd.Timestamp.today().normalize()
+            live_day = now_ts.tz_localize(None).normalize()
+            asof_day = pd.to_datetime(latest_asof).normalize() if latest_asof is not None else None
             last_row = hist_pnl_full.loc[hist_pnl_full["_date"] < live_day].sort_values("_date")
             last_cost = float(last_row.iloc[-1][cost_col]) if (cost_col and not last_row.empty) else float("nan")
             prev_close = float(last_row.iloc[-1][close_col]) if not last_row.empty else float("nan")
 
-            today_mask = hist_pnl_full["_date"] == live_day
-            if not today_mask.any():
-                new_row = {date_col: live_day.strftime("%d/%m/%y"), "_date": live_day}
-                hist_pnl_full = pd.concat([hist_pnl_full, pd.DataFrame([new_row])], ignore_index=True)
-                today_mask = hist_pnl_full["_date"] == live_day
+            update_day = live_day if market_open else asof_day
+            if update_day is not None:
+                today_mask = hist_pnl_full["_date"] == update_day
+                if not today_mask.any():
+                    new_row = {date_col: update_day.strftime("%d/%m/%y"), "_date": update_day}
+                    hist_pnl_full = pd.concat([hist_pnl_full, pd.DataFrame([new_row])], ignore_index=True)
+                    today_mask = hist_pnl_full["_date"] == update_day
 
-            if cost_col:
-                buy_val = float(hist_pnl_full.loc[today_mask, buy_col].iloc[0]) if buy_col else 0.0
-                sell_val = float(hist_pnl_full.loc[today_mask, sell_col].iloc[0]) if sell_col else 0.0
-                if not np.isnan(last_cost):
-                    cost_today = last_cost + buy_val - sell_val
-                else:
-                    cost_today = last_cost
-                if np.isnan(hist_pnl_full.loc[today_mask, cost_col]).all():
-                    hist_pnl_full.loc[today_mask, cost_col] = cost_today
+                if cost_col:
+                    buy_val = float(hist_pnl_full.loc[today_mask, buy_col].iloc[0]) if buy_col else 0.0
+                    sell_val = float(hist_pnl_full.loc[today_mask, sell_col].iloc[0]) if sell_col else 0.0
+                    if not np.isnan(last_cost):
+                        cost_today = last_cost + buy_val - sell_val
+                    else:
+                        cost_today = last_cost
+                    if np.isnan(hist_pnl_full.loc[today_mask, cost_col]).all():
+                        hist_pnl_full.loc[today_mask, cost_col] = cost_today
 
-            hist_pnl_full.loc[today_mask, close_col] = float(total_value)
-            if diff_col and cost_col:
-                hist_pnl_full.loc[today_mask, diff_col] = (
-                    hist_pnl_full.loc[today_mask, close_col] - hist_pnl_full.loc[today_mask, cost_col]
-                )
-            if pnl_col and not np.isnan(prev_close):
-                hist_pnl_full.loc[today_mask, pnl_col] = float(total_value) - prev_close
+                hist_pnl_full.loc[today_mask, close_col] = float(total_value)
+                if diff_col and cost_col:
+                    hist_pnl_full.loc[today_mask, diff_col] = (
+                        hist_pnl_full.loc[today_mask, close_col] - hist_pnl_full.loc[today_mask, cost_col]
+                    )
+                if pnl_col and not np.isnan(prev_close):
+                    hist_pnl_full.loc[today_mask, pnl_col] = float(total_value) - prev_close
 
-            if date_col:
-                out_df = hist_pnl_full.copy()
-                out_df[date_col] = out_df["_date"].dt.strftime("%d/%m/%y")
-                out_df = out_df.drop(columns=["_date", "date"], errors="ignore")
-                money_cols = [c for c in [cost_col, close_col, diff_col, pnl_col, buy_col, sell_col, "Liquidez"] if c and c in out_df.columns]
-                for col in money_cols:
-                    out_df[col] = pd.to_numeric(out_df[col], errors="coerce")
-                    out_df[col] = out_df[col].apply(lambda x: "" if pd.isna(x) else f"${x:,.2f}")
-                out_df.to_csv(SETTINGS.historical_pnl_path, index=False, sep="\t")
+                if date_col:
+                    out_df = hist_pnl_full.copy()
+                    out_df[date_col] = out_df["_date"].dt.strftime("%d/%m/%y")
+                    out_df = out_df.drop(columns=["_date", "date"], errors="ignore")
+                    money_cols = [c for c in [cost_col, close_col, diff_col, pnl_col, buy_col, sell_col, "Liquidez"] if c and c in out_df.columns]
+                    for col in money_cols:
+                        out_df[col] = pd.to_numeric(out_df[col], errors="coerce")
+                        out_df[col] = out_df[col].apply(lambda x: "" if pd.isna(x) else f"${x:,.2f}")
+                    out_df.to_csv(SETTINGS.historical_pnl_path, index=False, sep="\t")
 
         hist_pnl_full = hist_pnl_full.drop(columns=["_date"])
         hist_pnl_df = hist_pnl_full.copy()
