@@ -2,11 +2,8 @@ name: Update Market Snapshot
 
 on:
   schedule:
-    # 7:30–7:59 AM Sonora (UTC-7)
     - cron: "30-59/5 14 * * 1-5"
-    # 8:00 AM – 2:59 PM Sonora
     - cron: "*/5 15-21 * * 1-5"
-    # 3:00 PM Sonora (última corrida)
     - cron: "0 22 * * 1-5"
   workflow_dispatch:
 
@@ -32,6 +29,8 @@ jobs:
           pip install -r requirements.txt
 
       - name: Update historical P/L
+        env:
+          PYTHONPATH: ${{ github.workspace }}
         run: python scripts/update_historical_pnl.py
 
       - name: Commit and push changes
